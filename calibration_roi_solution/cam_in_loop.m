@@ -148,6 +148,8 @@ imwrite(phi_gray_export, temp_slm_path, 'bmp');
 calllib('SecondDll', 'saShowImageFromFilePath', ...
     temp_slm_path, 0, slm_full_w, 0, slm_full_w, slm_full_h, 1);
 pause(1.0);
+phi_slm_initial = phi_slm;
+phi_gray_export_initial = phi_gray_export;
 
 %% 6. 相机唤醒：提高曝光准备闭环
 fprintf('--> 唤醒相机，自适应提高曝光...\n');
@@ -189,6 +191,8 @@ A_weight = Amp_T;        % 自适应权重矩阵
 Target_Amp_ROI = Amp_T(row_start:row_end, col_start:col_end);
 max_sample_oob_ratio = 0.01;
 min_sample_mean_intensity = 1.0;
+diagnostic_save_enabled = true;
+diagnostic_max_raw_frames = closed_loop_iters;
 
 % 标定映射 ROI：
 % 四点像素匹配结果用于描述当前光路下“算法平面 -> 相机平面”的仿射映射。
@@ -228,15 +232,51 @@ if calib_roi.is_clipped
     error('标定映射 ROI 被相机边界截断，请重新检查标定、零级光中心或 shift_x/shift_y 设置。');
 end
 
+diag = struct();
+if diagnostic_save_enabled
+    diag.run_timestamp = char(datetime('now', 'Format', 'yyyyMMdd_HHmmss'));
+    diag.output_dir = fullfile(solution_dir, 'hardware_diagnostics', ['run_' diag.run_timestamp]);
+    if ~exist(diag.output_dir, 'dir')
+        mkdir(diag.output_dir);
+    end
+
+    raw_frame_count = min(closed_loop_iters, diagnostic_max_raw_frames);
+    diag.raw_frame_stride = max(1, ceil(closed_loop_iters / raw_frame_count));
+    diag.raw_frame_loop = zeros(1, raw_frame_count);
+    diag.raw_frame_stack = zeros(cam_H, cam_W, raw_frame_count, 'uint8');
+    diag.raw_frame_write_index = 0;
+
+    diag.sampled_roi_raw_stack = zeros(algo_roi_h, algo_roi_w, closed_loop_iters);
+    diag.sampled_roi_smooth_stack = zeros(algo_roi_h, algo_roi_w, closed_loop_iters);
+    diag.normalized_amp_roi_stack = zeros(algo_roi_h, algo_roi_w, closed_loop_iters);
+    diag.weight_roi_stack = zeros(algo_roi_h, algo_roi_w, closed_loop_iters);
+    diag.err_rms = nan(1, closed_loop_iters);
+    diag.sample_mean = nan(1, closed_loop_iters);
+    diag.sample_oob_ratio = nan(1, closed_loop_iters);
+    diag.sample_valid_ratio = nan(1, closed_loop_iters);
+    diag.sample_x_range = nan(closed_loop_iters, 2);
+    diag.sample_y_range = nan(closed_loop_iters, 2);
+    diag.exposure_us = nan(1, closed_loop_iters);
+end
+
 for loop = 1:closed_loop_iters
     % 1. 获取当前实拍光场。
     img_raw = double(getsnapshot(vid));
+    if diagnostic_save_enabled && ...
+            (loop == 1 || loop == closed_loop_iters || mod(loop - 1, diag.raw_frame_stride) == 0)
+        if diag.raw_frame_write_index < size(diag.raw_frame_stack, 3)
+            diag.raw_frame_write_index = diag.raw_frame_write_index + 1;
+            diag.raw_frame_loop(diag.raw_frame_write_index) = loop;
+            diag.raw_frame_stack(:, :, diag.raw_frame_write_index) = ...
+                uint8(max(min(round(img_raw), 255), 0));
+        end
+    end
 
     % 2. 通过标定仿射反向采样，让误差矩阵与算法 ROI 像素一一对应。
-    [cam_resized, sample_info] = sampleCalibrationROIFromCamera( ...
+    [cam_sampled_raw, sample_info] = sampleCalibrationROIFromCamera( ...
         img_raw, calib_file, [cx, cy], ...
         row_start, row_end, col_start, col_end, N);
-    cam_resized = imgaussfilt(cam_resized, 0.6);
+    cam_resized = imgaussfilt(cam_sampled_raw, 0.6);
 
     if sample_info.out_of_bounds_ratio > max_sample_oob_ratio
         error(['标定反向采样越界比例过高：%.3f%% > %.3f%%。' ...
@@ -264,11 +304,32 @@ for loop = 1:closed_loop_iters
     fprintf('  Loop %02d/%02d | 实拍光斑 RMS 误差: %.4f | sample oob: %.4f | mean: %.3f\n', ...
         loop, closed_loop_iters, err_rms, sample_info.out_of_bounds_ratio, sample_mean);
 
+    if diagnostic_save_enabled
+        diag.sampled_roi_raw_stack(:, :, loop) = cam_sampled_raw;
+        diag.sampled_roi_smooth_stack(:, :, loop) = cam_resized;
+        diag.normalized_amp_roi_stack(:, :, loop) = A_cam_norm;
+        diag.err_rms(loop) = err_rms;
+        diag.sample_mean(loop) = sample_mean;
+        diag.sample_oob_ratio(loop) = sample_info.out_of_bounds_ratio;
+        diag.sample_valid_ratio(loop) = sample_info.valid_pixel_ratio;
+        diag.sample_x_range(loop, :) = sample_info.sample_x_range;
+        diag.sample_y_range(loop, :) = sample_info.sample_y_range;
+        diag.exposure_us(loop) = src.ExposureTime;
+        if loop == 1
+            diag.sample_x_grid = sample_info.sample_x;
+            diag.sample_y_grid = sample_info.sample_y;
+            diag.sample_in_bounds = sample_info.in_bounds;
+        end
+    end
+
     % 7. 更新 Weighted GS 中的局部目标权重。
     Weight_ROI = A_weight(row_start:row_end, col_start:col_end);
     Weight_ROI = Weight_ROI + feedback_sign * alpha * (Target_Amp_ROI - A_cam_norm);
     Weight_ROI(Weight_ROI < 0) = 0;
     A_weight(row_start:row_end, col_start:col_end) = Weight_ROI;
+    if diagnostic_save_enabled
+        diag.weight_roi_stack(:, :, loop) = Weight_ROI;
+    end
 
     % 8. 用新权重执行少量内部 GS 迭代。
     for k = 1:5
@@ -288,6 +349,126 @@ end
 
 final_flattop = getsnapshot(vid);
 fprintf('================ 闭环优化结束 ================\n');
+
+if diagnostic_save_enabled
+    diag.raw_frame_loop = diag.raw_frame_loop(1:diag.raw_frame_write_index);
+    diag.raw_frame_stack = diag.raw_frame_stack(:, :, 1:diag.raw_frame_write_index);
+    [diag.best_err_rms, diag.best_loop] = min(diag.err_rms);
+
+    diag.zero_order_img = uint8(max(min(round(zero_order_img), 255), 0));
+    diag.initial_flattop = uint8(max(min(round(initial_flattop), 255), 0));
+    diag.final_flattop = uint8(max(min(round(final_flattop), 255), 0));
+    diag.Target_Amp_ROI = Target_Amp_ROI;
+    diag.A_weight_final = A_weight;
+    diag.A_weight_roi_final = A_weight(row_start:row_end, col_start:col_end);
+    diag.phi_slm_initial = phi_slm_initial;
+    diag.phi_slm_final = phi_slm;
+    diag.phi_gray_export_initial = phi_gray_export_initial;
+    diag.phi_gray_export_final = phi_gray_export;
+    diag.calib_roi = calib_roi;
+    diag.calib_info = calib_info;
+    calib_snapshot = load(calib_file);
+    diag.calib_data = calib_snapshot.calib_data;
+    diag.params = struct( ...
+        'N', N, ...
+        'p_slm', p_slm, ...
+        'lambda', lambda, ...
+        'f', f, ...
+        'cam_pixel_pitch', cam_pixel_pitch, ...
+        'target_w_px', target_w_px, ...
+        'target_h_px', target_h_px, ...
+        'target_w_algo', target_w_algo, ...
+        'target_h_algo', target_h_algo, ...
+        'shift_x', shift_x, ...
+        'shift_y', shift_y, ...
+        'row_start', row_start, ...
+        'row_end', row_end, ...
+        'col_start', col_start, ...
+        'col_end', col_end, ...
+        'algo_roi_h', algo_roi_h, ...
+        'algo_roi_w', algo_roi_w, ...
+        'cam_H', cam_H, ...
+        'cam_W', cam_W, ...
+        'zero_center_xy', [cx, cy], ...
+        'final_exposure_us', final_exposure, ...
+        'closed_loop_iters', closed_loop_iters, ...
+        'alpha', alpha, ...
+        'feedback_sign', feedback_sign, ...
+        'max_sample_oob_ratio', max_sample_oob_ratio, ...
+        'min_sample_mean_intensity', min_sample_mean_intensity, ...
+        'calib_file', calib_file);
+
+    imwrite(diag.zero_order_img, fullfile(diag.output_dir, 'zero_order_img.png'));
+    imwrite(diag.initial_flattop, fullfile(diag.output_dir, 'initial_flattop.png'));
+    imwrite(diag.final_flattop, fullfile(diag.output_dir, 'final_flattop.png'));
+    imwrite(phi_gray_export_initial, fullfile(diag.output_dir, 'phase_initial.bmp'));
+    imwrite(phi_gray_export, fullfile(diag.output_dir, 'phase_final.bmp'));
+    copyfile(calib_file, fullfile(diag.output_dir, 'Calibration_Mapping_Data.mat'));
+
+    best_raw_index = find(diag.raw_frame_loop == diag.best_loop, 1);
+    if ~isempty(best_raw_index)
+        imwrite(diag.raw_frame_stack(:, :, best_raw_index), ...
+            fullfile(diag.output_dir, sprintf('best_loop_%02d_raw.png', diag.best_loop)));
+    end
+    imwrite(uint8(255 * mat2gray(diag.sampled_roi_raw_stack(:, :, diag.best_loop))), ...
+        fullfile(diag.output_dir, sprintf('best_loop_%02d_sampled_roi_raw.png', diag.best_loop)));
+    imwrite(uint8(255 * mat2gray(diag.sampled_roi_smooth_stack(:, :, diag.best_loop))), ...
+        fullfile(diag.output_dir, sprintf('best_loop_%02d_sampled_roi_smooth.png', diag.best_loop)));
+
+    diag_fig = figure('Name', 'Hardware Loop Diagnostics', ...
+        'Position', [80, 80, 1500, 900], ...
+        'Color', 'w', ...
+        'Visible', 'off');
+    tiledlayout(diag_fig, 2, 3, 'Padding', 'compact', 'TileSpacing', 'compact');
+
+    nexttile;
+    plot(1:closed_loop_iters, diag.err_rms, 'o-', 'LineWidth', 1.4);
+    grid on;
+    xlabel('Loop');
+    ylabel('RMS error');
+    title(sprintf('RMS, best loop %02d = %.4f', diag.best_loop, diag.best_err_rms));
+
+    nexttile;
+    plot(1:closed_loop_iters, diag.sample_mean, 'o-', 'LineWidth', 1.4);
+    grid on;
+    xlabel('Loop');
+    ylabel('Mean intensity');
+    title('Sampled ROI mean');
+
+    nexttile;
+    imshow(diag.initial_flattop, [0, 255]);
+    colormap(gca, 'hot');
+    hold on;
+    rectangle('Position', [cam_c_start, cam_r_start, cam_roi_w, cam_roi_h], ...
+        'EdgeColor', 'g', 'LineWidth', 1.5, 'LineStyle', '-.');
+    title('Initial camera frame');
+
+    nexttile;
+    imshow(diag.final_flattop, [0, 255]);
+    colormap(gca, 'hot');
+    hold on;
+    rectangle('Position', [cam_c_start, cam_r_start, cam_roi_w, cam_roi_h], ...
+        'EdgeColor', 'g', 'LineWidth', 1.5, 'LineStyle', '-.');
+    title('Final camera frame');
+
+    nexttile;
+    imagesc(diag.sampled_roi_smooth_stack(:, :, diag.best_loop));
+    axis image;
+    colorbar;
+    title('Best sampled ROI');
+
+    nexttile;
+    imagesc(diag.normalized_amp_roi_stack(:, :, diag.best_loop) - Target_Amp_ROI);
+    axis image;
+    colorbar;
+    title('Best normalized amplitude error');
+
+    exportgraphics(diag_fig, fullfile(diag.output_dir, 'diagnostic_summary.png'), 'Resolution', 150);
+    close(diag_fig);
+
+    save(fullfile(diag.output_dir, 'hardware_diagnostics.mat'), 'diag', '-v7.3');
+    fprintf('--> 诊断数据已保存: %s\n', diag.output_dir);
+end
 
 %% 8. 安全停机与资源释放
 if exist('vid', 'var') && isvalid(vid)
