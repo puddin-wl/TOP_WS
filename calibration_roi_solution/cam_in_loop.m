@@ -191,7 +191,8 @@ A_weight = Amp_T;        % 自适应权重矩阵
 Target_Amp_ROI = Amp_T(row_start:row_end, col_start:col_end);
 max_sample_oob_ratio = 0.01;
 min_sample_mean_intensity = 1.0;
-diagnostic_save_enabled = true;
+roi_area_sample_count = 7;  % 每个算法 ROI 像素用 7x7 子采样做相机物理面积平均。
+diagnostic_save_enabled = closed_loop_iters > 0; % Keep diagnostics on for hardware runs.
 diagnostic_max_raw_frames = closed_loop_iters;
 
 % 标定映射 ROI：
@@ -248,6 +249,10 @@ if diagnostic_save_enabled
 
     diag.sampled_roi_raw_stack = zeros(algo_roi_h, algo_roi_w, closed_loop_iters);
     diag.sampled_roi_smooth_stack = zeros(algo_roi_h, algo_roi_w, closed_loop_iters);
+    diag.point_sampled_roi_raw_stack = zeros(algo_roi_h, algo_roi_w, closed_loop_iters);
+    diag.point_sampled_roi_smooth_stack = zeros(algo_roi_h, algo_roi_w, closed_loop_iters);
+    diag.point_normalized_amp_roi_stack = zeros(algo_roi_h, algo_roi_w, closed_loop_iters);
+    diag.point_err_rms = nan(1, closed_loop_iters);
     diag.normalized_amp_roi_stack = zeros(algo_roi_h, algo_roi_w, closed_loop_iters);
     diag.weight_roi_stack = zeros(algo_roi_h, algo_roi_w, closed_loop_iters);
     diag.err_rms = nan(1, closed_loop_iters);
@@ -272,11 +277,18 @@ for loop = 1:closed_loop_iters
         end
     end
 
-    % 2. 通过标定仿射反向采样，让误差矩阵与算法 ROI 像素一一对应。
+    % 2. 通过标定仿射面积平均采样，让误差矩阵对应相机上的物理小区域。
     [cam_sampled_raw, sample_info] = sampleCalibrationROIFromCamera( ...
         img_raw, calib_file, [cx, cy], ...
-        row_start, row_end, col_start, col_end, N);
+        row_start, row_end, col_start, col_end, N, roi_area_sample_count);
     cam_resized = imgaussfilt(cam_sampled_raw, 0.6);
+
+    if diagnostic_save_enabled
+        [cam_point_sampled_raw, point_sample_info] = sampleCalibrationROIFromCamera( ...
+            img_raw, calib_file, [cx, cy], ...
+            row_start, row_end, col_start, col_end, N, 1);
+        cam_point_resized = imgaussfilt(cam_point_sampled_raw, 0.6);
+    end
 
     if sample_info.out_of_bounds_ratio > max_sample_oob_ratio
         error(['标定反向采样越界比例过高：%.3f%% > %.3f%%。' ...
@@ -301,12 +313,32 @@ for loop = 1:closed_loop_iters
 
     % 6. 计算 RMS 误差，用于监控闭环收敛情况。
     err_rms = sqrt(mean((Target_Amp_ROI(:) - A_cam_norm(:)).^2));
-    fprintf('  Loop %02d/%02d | 实拍光斑 RMS 误差: %.4f | sample oob: %.4f | mean: %.3f\n', ...
-        loop, closed_loop_iters, err_rms, sample_info.out_of_bounds_ratio, sample_mean);
+    if diagnostic_save_enabled
+        A_point_roi = sqrt(max(cam_point_resized, 0));
+        A_point_sum = sum(A_point_roi(:));
+        if A_point_sum > eps
+            A_point_norm = A_point_roi * (sum(Target_Amp_ROI(:)) / A_point_sum);
+            point_err_rms = sqrt(mean((Target_Amp_ROI(:) - A_point_norm(:)).^2));
+        else
+            A_point_norm = zeros(size(A_point_roi));
+            point_err_rms = NaN;
+        end
+        fprintf(['  Loop %02d/%02d | area RMS: %.4f | point RMS: %.4f | ' ...
+                 'sample oob: %.4f | mean: %.3f\n'], ...
+            loop, closed_loop_iters, err_rms, point_err_rms, ...
+            sample_info.out_of_bounds_ratio, sample_mean);
+    else
+        fprintf('  Loop %02d/%02d | area RMS: %.4f | sample oob: %.4f | mean: %.3f\n', ...
+            loop, closed_loop_iters, err_rms, sample_info.out_of_bounds_ratio, sample_mean);
+    end
 
     if diagnostic_save_enabled
         diag.sampled_roi_raw_stack(:, :, loop) = cam_sampled_raw;
         diag.sampled_roi_smooth_stack(:, :, loop) = cam_resized;
+        diag.point_sampled_roi_raw_stack(:, :, loop) = cam_point_sampled_raw;
+        diag.point_sampled_roi_smooth_stack(:, :, loop) = cam_point_resized;
+        diag.point_normalized_amp_roi_stack(:, :, loop) = A_point_norm;
+        diag.point_err_rms(loop) = point_err_rms;
         diag.normalized_amp_roi_stack(:, :, loop) = A_cam_norm;
         diag.err_rms(loop) = err_rms;
         diag.sample_mean(loop) = sample_mean;
@@ -315,11 +347,6 @@ for loop = 1:closed_loop_iters
         diag.sample_x_range(loop, :) = sample_info.sample_x_range;
         diag.sample_y_range(loop, :) = sample_info.sample_y_range;
         diag.exposure_us(loop) = src.ExposureTime;
-        if loop == 1
-            diag.sample_x_grid = sample_info.sample_x;
-            diag.sample_y_grid = sample_info.sample_y;
-            diag.sample_in_bounds = sample_info.in_bounds;
-        end
     end
 
     % 7. 更新 Weighted GS 中的局部目标权重。
@@ -394,6 +421,7 @@ if diagnostic_save_enabled
         'closed_loop_iters', closed_loop_iters, ...
         'alpha', alpha, ...
         'feedback_sign', feedback_sign, ...
+        'roi_area_sample_count', roi_area_sample_count, ...
         'max_sample_oob_ratio', max_sample_oob_ratio, ...
         'min_sample_mean_intensity', min_sample_mean_intensity, ...
         'calib_file', calib_file);
@@ -411,9 +439,13 @@ if diagnostic_save_enabled
             fullfile(diag.output_dir, sprintf('best_loop_%02d_raw.png', diag.best_loop)));
     end
     imwrite(uint8(255 * mat2gray(diag.sampled_roi_raw_stack(:, :, diag.best_loop))), ...
-        fullfile(diag.output_dir, sprintf('best_loop_%02d_sampled_roi_raw.png', diag.best_loop)));
+        fullfile(diag.output_dir, sprintf('best_loop_%02d_area_roi_raw.png', diag.best_loop)));
     imwrite(uint8(255 * mat2gray(diag.sampled_roi_smooth_stack(:, :, diag.best_loop))), ...
-        fullfile(diag.output_dir, sprintf('best_loop_%02d_sampled_roi_smooth.png', diag.best_loop)));
+        fullfile(diag.output_dir, sprintf('best_loop_%02d_area_roi_smooth.png', diag.best_loop)));
+    imwrite(uint8(255 * mat2gray(diag.point_sampled_roi_raw_stack(:, :, diag.best_loop))), ...
+        fullfile(diag.output_dir, sprintf('best_loop_%02d_point_roi_raw.png', diag.best_loop)));
+    imwrite(uint8(255 * mat2gray(diag.point_sampled_roi_smooth_stack(:, :, diag.best_loop))), ...
+        fullfile(diag.output_dir, sprintf('best_loop_%02d_point_roi_smooth.png', diag.best_loop)));
 
     diag_fig = figure('Name', 'Hardware Loop Diagnostics', ...
         'Position', [80, 80, 1500, 900], ...
@@ -423,10 +455,13 @@ if diagnostic_save_enabled
 
     nexttile;
     plot(1:closed_loop_iters, diag.err_rms, 'o-', 'LineWidth', 1.4);
+    hold on;
+    plot(1:closed_loop_iters, diag.point_err_rms, 's--', 'LineWidth', 1.1);
     grid on;
     xlabel('Loop');
     ylabel('RMS error');
-    title(sprintf('RMS, best loop %02d = %.4f', diag.best_loop, diag.best_err_rms));
+    legend({'area average', 'point sample'}, 'Location', 'northeast');
+    title(sprintf('Area RMS, best loop %02d = %.4f', diag.best_loop, diag.best_err_rms));
 
     nexttile;
     plot(1:closed_loop_iters, diag.sample_mean, 'o-', 'LineWidth', 1.4);
@@ -455,7 +490,7 @@ if diagnostic_save_enabled
     imagesc(diag.sampled_roi_smooth_stack(:, :, diag.best_loop));
     axis image;
     colorbar;
-    title('Best sampled ROI');
+    title('Best area-averaged ROI');
 
     nexttile;
     imagesc(diag.normalized_amp_roi_stack(:, :, diag.best_loop) - Target_Amp_ROI);

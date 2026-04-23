@@ -8,3 +8,8 @@
 - 2026-04-23 update: closed-loop error now uses calibration-affine reverse sampling via
   `sampleCalibrationROIFromCamera.m`, so the measured error matrix is pixel-aligned with the
   algorithm ROI instead of being produced by camera-box crop/rotate/resize.
+- 2026-04-23 update: feedback sampling now supports area averaging. Hardware feedback uses
+  a 7x7 sub-sample average per algorithm ROI pixel to better optimize camera-area
+  uniformity across the physical ROI, while point sampling is saved as a diagnostic contrast.
+- Working rule: after each code or diagnostic modification is completed and checked,
+  choose an appropriate commit message, commit the change, and push the current branch.
