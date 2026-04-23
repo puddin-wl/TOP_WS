@@ -24,7 +24,7 @@ if ~exist(black_bmp_path, 'file')
     black_bmp_path = 'Black.bmp';
 end
 
-calib_file = fullfile(project_root, 'Calibration_Mapping_Data.mat');
+calib_file = fullfile(project_root, './photo/Calibration_Mapping_Data.mat');
 
 if ~libisloaded('SecondDll')
     loadlibrary('SecondDll.dll', 'SecondDll.h');
@@ -57,10 +57,10 @@ y = linspace(-D/2, D/2, N);
 dp_focal = (lambda * f) / (N * p_slm);
 
 %% 3. 平顶光目标尺寸与算法偏移
-target_w_px = 200; % 目标平顶宽度，单位相机像素
-target_h_px = 150; % 目标平顶高度，单位相机像素
-shift_x = 100;     % 算法平面 X 偏移；正值对应相机 +X
-shift_y = 100;     % 算法平面 Y 偏移；正值对应相机 -Y
+target_w_px = 330; % 目标平顶宽度，单位相机像素
+target_h_px = 120; % 目标平顶高度，单位相机像素
+shift_x = -100;     % 算法平面 X 偏移；正值对应相机 +X
+shift_y = -100;     % 算法平面 Y 偏移；正值对应相机 -Y
 
 target_width_um = target_w_px * cam_pixel_pitch;
 target_height_um = target_h_px * cam_pixel_pitch;
@@ -184,7 +184,7 @@ fprintf('--> 曝光准备完毕: %.0f us。正式进入硬件闭环反馈。\n\n
 %% 7. 硬件在环迭代（Camera-in-the-Loop）
 fprintf('================ 开始实验实拍反馈迭代 ================\n');
 
-closed_loop_iters = 15;  % 实验闭环次数
+closed_loop_iters = 50;  % 实验闭环次数
 alpha = 0.1;             % 反馈步长，调小可降低震荡风险
 feedback_sign = 1;       % 初始保持正反馈符号，若实验发散再单独改为 -1 验证。
 A_weight = Amp_T;        % 自适应权重矩阵
@@ -196,7 +196,7 @@ diagnostic_save_enabled = closed_loop_iters > 0; % Keep diagnostics on for hardw
 diagnostic_max_raw_frames = closed_loop_iters;
 
 % 标定映射 ROI：
-% 四点像素匹配结果用于描述当前光路下“算法平面 -> 相机平面”的仿射映射。
+% 四点像素匹配结果用于描述当前光路下"算法平面 -> 相机平面"的仿射映射。
 % 标定质量不满足阈值时，程序会停止，避免使用错误 ROI 继续闭环。
 algo_roi_h = row_end - row_start + 1;
 algo_roi_w = col_end - col_start + 1;
