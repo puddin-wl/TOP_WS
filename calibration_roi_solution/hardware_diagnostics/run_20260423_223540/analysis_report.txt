@@ -1,0 +1,34 @@
+Hardware diagnostics analysis
+Run: E:\program\TOP_WS\calibration_roi_solution\hardware_diagnostics\run_20260423_223540
+
+RMS: first 7.715132, last 4.947507, best loop 14 = 4.905709, drop 35.87%
+Feedback sampling: area_average, area sample count = 7 x 7
+Point-sampling comparison at best loop: RMS 5.458808, abs p95 10.542163, CV 0.424210, point/area RMS ratio 1.112746
+Sampling: max OOB 0.00000000, min valid 1.00000000
+Target amplitude: mean 25.127320, flat=1
+
+Intensity ROI first/last:
+  mean 30.121008 -> 29.050654
+  std  18.882747 -> 11.197357
+  CV   0.626896 -> 0.385442
+  min  3.821254 -> 4.316640
+  max  122.092924 -> 73.802845
+
+Best loop spatial error:
+  amp error mean/std/min/max = -0.000000 / 4.909430 / -15.706587 / 13.680241
+  abs error p95 = 9.515706
+  intensity mean/std/CV/min/max = 29.136130 / 11.082652 / 0.380375 / 3.945144 / 66.946237
+  edge abs error 4.358420, center abs error 3.649481, ratio 1.194258
+  plane energy fraction 0.016516, plane RMS 0.630463, residual RMS 4.865028
+
+Top absolute error pixels at best loop:
+  row  1 col  4: amp error -15.706587, intensity 3.945144
+  row 21 col 26: amp error +13.680241, intensity 66.946237
+  row 22 col  5: amp error -13.613638, intensity 5.892804
+  row  3 col  6: amp error +13.550487, intensity 66.499314
+  row  4 col  4: amp error +12.703498, intensity 63.618723
+  row 10 col 12: amp error +12.686072, intensity 63.560129
+  row 22 col 11: amp error -12.447934, intensity 7.146443
+  row  4 col  3: amp error +12.291793, intensity 62.241558
+  row  2 col 30: amp error -11.990817, intensity 7.671018
+  row  5 col  8: amp error +11.931564, intensity 61.048943
