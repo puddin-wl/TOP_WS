@@ -183,9 +183,12 @@ fprintf('--> 曝光准备完毕: %.0f us。正式进入硬件闭环反馈。\n\n
 fprintf('================ 开始实验实拍反馈迭代 ================\n');
 
 closed_loop_iters = 15;  % 实验闭环次数
-alpha = 0.3;             % 反馈步长，调小可降低震荡风险
+alpha = 0.1;             % 反馈步长，调小可降低震荡风险
+feedback_sign = 1;       % 初始保持正反馈符号，若实验发散再单独改为 -1 验证。
 A_weight = Amp_T;        % 自适应权重矩阵
 Target_Amp_ROI = Amp_T(row_start:row_end, col_start:col_end);
+max_sample_oob_ratio = 0.01;
+min_sample_mean_intensity = 1.0;
 
 % 标定映射 ROI：
 % 四点像素匹配结果用于描述当前光路下“算法平面 -> 相机平面”的仿射映射。
@@ -229,28 +232,41 @@ for loop = 1:closed_loop_iters
     % 1. 获取当前实拍光场。
     img_raw = double(getsnapshot(vid));
 
-    % 2. 按标定映射 ROI 截取平顶光区域。
-    cam_crop = img_raw(cam_r_start:cam_r_end, cam_c_start:cam_c_end);
+    % 2. 通过标定仿射反向采样，让误差矩阵与算法 ROI 像素一一对应。
+    [cam_resized, sample_info] = sampleCalibrationROIFromCamera( ...
+        img_raw, calib_file, [cx, cy], ...
+        row_start, row_end, col_start, col_end, N);
+    cam_resized = imgaussfilt(cam_resized, 0.6);
 
-    % 3. 光学倒像修正和散斑平滑。
-    cam_crop = rot90(cam_crop, 2);
-    cam_crop = imgaussfilt(cam_crop, 1.5);
+    if sample_info.out_of_bounds_ratio > max_sample_oob_ratio
+        error(['标定反向采样越界比例过高：%.3f%% > %.3f%%。' ...
+               '请重新标定，或检查零级光中心/shift_x/shift_y 偏移。'], ...
+            100 * sample_info.out_of_bounds_ratio, 100 * max_sample_oob_ratio);
+    end
 
-    % 4. 将相机 ROI 缩放回算法 ROI 尺寸。
-    cam_resized = imresize(cam_crop, [algo_roi_h, algo_roi_w], 'bicubic');
+    sample_mean = mean(max(cam_resized(:), 0));
+    if sample_mean < min_sample_mean_intensity
+        error(['标定反向采样能量过低：mean %.3f < %.3f。' ...
+               '请重新标定，或检查光路对准/偏移设置。'], ...
+            sample_mean, min_sample_mean_intensity);
+    end
 
-    % 5. 提取实拍振幅并按目标 ROI 总振幅归一化。
+    % 3. 提取实拍振幅并按目标 ROI 总振幅归一化。
     A_cam_roi = sqrt(max(cam_resized, 0));
-    A_cam_norm = A_cam_roi * (sum(Target_Amp_ROI(:)) / sum(A_cam_roi(:)));
+    A_cam_sum = sum(A_cam_roi(:));
+    if A_cam_sum <= eps
+        error('标定反向采样得到零振幅，请重新标定或检查偏移设置。');
+    end
+    A_cam_norm = A_cam_roi * (sum(Target_Amp_ROI(:)) / A_cam_sum);
 
     % 6. 计算 RMS 误差，用于监控闭环收敛情况。
     err_rms = sqrt(mean((Target_Amp_ROI(:) - A_cam_norm(:)).^2));
-    fprintf('  Loop %02d/%02d | 实拍光斑 RMS 误差: %.4f\n', ...
-        loop, closed_loop_iters, err_rms);
+    fprintf('  Loop %02d/%02d | 实拍光斑 RMS 误差: %.4f | sample oob: %.4f | mean: %.3f\n', ...
+        loop, closed_loop_iters, err_rms, sample_info.out_of_bounds_ratio, sample_mean);
 
     % 7. 更新 Weighted GS 中的局部目标权重。
     Weight_ROI = A_weight(row_start:row_end, col_start:col_end);
-    Weight_ROI = Weight_ROI + alpha * (Target_Amp_ROI - A_cam_norm);
+    Weight_ROI = Weight_ROI + feedback_sign * alpha * (Target_Amp_ROI - A_cam_norm);
     Weight_ROI(Weight_ROI < 0) = 0;
     A_weight(row_start:row_end, col_start:col_end) = Weight_ROI;
 

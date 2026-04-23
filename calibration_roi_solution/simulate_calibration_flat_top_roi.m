@@ -107,7 +107,7 @@ physics_box = [
 physics_iou = localBoxIoU(calib_box, physics_box);
 fprintf('Physics formula ROI / calibration ROI IoU = %.6f\n', physics_iou);
 
-%% 生成合成图并画出三种框
+%% 生成合成图，并用同一反向采样函数验证像素对应关系
 [CamX, CamY] = meshgrid(1:cam_W, 1:cam_H);
 rng(11);
 sim_img = max(6 + 2 * randn(cam_H, cam_W), 0);
@@ -115,14 +115,45 @@ zero_spot = 120 * exp(-((CamX-zero_center_xy(1)).^2 + ...
                          (CamY-zero_center_xy(2)).^2) / (2 * 18^2));
 sim_img = sim_img + zero_spot;
 
-flat_patch = 165 + 8 * randn(truth_box(4), truth_box(3));
-sim_img(truth_r_start:truth_r_end, truth_c_start:truth_c_end) = flat_patch;
+inv_tform = invert(tform);
+cam_dx_grid = CamX - zero_center_xy(1);
+cam_dy_grid = CamY - zero_center_xy(2);
+[algo_x_from_cam, algo_y_from_cam] = transformPointsForward(inv_tform, cam_dx_grid, cam_dy_grid);
+
+[algo_col_grid, algo_row_grid] = meshgrid(col_start:col_end, row_start:row_end);
+algo_center = (N + 1) / 2;
+algo_x_grid = algo_col_grid - algo_center;
+algo_y_grid = algo_row_grid - algo_center;
+
+% Use an affine intensity field; bilinear camera sampling should recover it
+% to numerical precision when the coordinate mapping is correct.
+truth_field_cam = 165 + 0.07 * algo_x_from_cam - 0.05 * algo_y_from_cam;
+truth_roi_expected = 165 + 0.07 * algo_x_grid - 0.05 * algo_y_grid;
+
+inside_algo_roi = algo_x_from_cam >= min(algo_x_grid(:)) - 2 & ...
+                  algo_x_from_cam <= max(algo_x_grid(:)) + 2 & ...
+                  algo_y_from_cam >= min(algo_y_grid(:)) - 2 & ...
+                  algo_y_from_cam <= max(algo_y_grid(:)) + 2;
+sim_img(inside_algo_roi) = truth_field_cam(inside_algo_roi);
 sim_img = min(max(sim_img, 0), 255);
 
+[sampled_roi, sample_info] = sampleCalibrationROIFromCamera( ...
+    sim_img, calib_file, zero_center_xy, ...
+    row_start, row_end, col_start, col_end, N);
+sample_error_rms = sqrt(mean((sampled_roi(:) - truth_roi_expected(:)).^2));
+
+fprintf('Reverse sample out-of-bounds ratio = %.8f\n', sample_info.out_of_bounds_ratio);
+fprintf('Reverse sample size = %d x %d (expected %d x %d)\n', ...
+    size(sampled_roi, 2), size(sampled_roi, 1), algo_roi_w, algo_roi_h);
+fprintf('Reverse sample RMS error = %.10f intensity counts\n', sample_error_rms);
+
 fig = figure('Name', 'Calibration ROI Simulation', 'Color', 'w', 'Visible', 'off');
+tiledlayout(fig, 1, 2, 'Padding', 'compact', 'TileSpacing', 'compact');
+
+nexttile;
 imagesc(sim_img);
 axis image;
-colormap hot;
+colormap(gca, hot);
 colorbar;
 hold on;
 
@@ -138,10 +169,16 @@ h_physics_key = plot(nan, nan, 'c:', 'LineWidth', 1.5);
 legend([h_zero, h_truth_key, h_calib_key, h_physics_key], ...
     {'zero order', 'synthetic truth', 'calibration ROI', 'physics reference'}, ...
     'Location', 'southoutside');
-
-title(sprintf('Calibration ROI validation: IoU %.4f, max reproj %.3f px', ...
+title(sprintf('Camera plane: IoU %.4f, max reproj %.3f px', ...
     calib_iou, quality.max_reprojection_error_px));
 hold off;
+
+nexttile;
+imagesc(sampled_roi);
+axis image;
+colormap(gca, parula);
+colorbar;
+title(sprintf('Reverse sampled algorithm ROI: RMS %.3g', sample_error_rms));
 
 out_png = fullfile(solution_dir, 'simulation_calibration_roi_result.png');
 exportgraphics(fig, out_png, 'Resolution', 150);

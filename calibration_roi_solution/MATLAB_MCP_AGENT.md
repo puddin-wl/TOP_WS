@@ -5,3 +5,6 @@
 - Required workflow: run `Pixel_Matching_Probe.m` before each experiment, then run `calibration_roi_solution/cam_in_loop.m`.
 - Quality gates: max reprojection error <= 3 px, scale error <= 5%, rotation abs <= 5 deg.
 - Non-hardware validation: run `simulate_calibration_flat_top_roi.m`.
+- 2026-04-23 update: closed-loop error now uses calibration-affine reverse sampling via
+  `sampleCalibrationROIFromCamera.m`, so the measured error matrix is pixel-aligned with the
+  algorithm ROI instead of being produced by camera-box crop/rotate/resize.
